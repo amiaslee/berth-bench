@@ -61,6 +61,8 @@ trap 'umount "$R/work" "$R/proc" 2>/dev/null || true' EXIT
 chroot "$R" /bin/sh -c 'cd /work/webapp && HOME=/tmp npm ci --cache /work/.npm --no-audit --no-fund --loglevel=error && npm run build >/dev/null && rm -rf node_modules dist'
 umount "$R/work" "$R/proc"; trap - EXIT
 echo "berth-user-disk" > "$W/.berth-marker"
+# 模板盘里的文件归 root（拷进来时带着本机用户的 uid；去掉特权的墙里 root 也写不进别人的目录）
+chown -R 0:0 "$W"
 # 模板内容的指纹：恢复快照换上盘以后在客机里重算一遍，核"客机没读到占位盘的旧缓存"
 (cd "$W" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1) > "$BENCH_ROOT/images/work.digest"
 du -sh "$W" "$W/.npm"

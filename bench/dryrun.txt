@@ -1,7 +1,7 @@
 # GitHub 干跑只跑这里点到的（只重跑改到的那几组，省时间）。
 # EXPS：跑哪几个实验；BENCH_PARTS：起机、换盘、NetPlay 里只跑哪几段（不写就全跑）；
 # BENCH_BUILD_KINDS / BENCH_GODOT_KINDS：编译、Godot 只跑哪几种。整套重跑要先在报告里说一声。
-EXPS="probe boot disk netplay wall cmdnet agent clock gvlimits density build usage"
-BENCH_PARTS="wake-pages,wake-burst,gvisor-in-vm,gvisor-ckpt,pause,restore100,uffd-fault,integrity,snap-latency,zfs-send,zfs-send-enc,godot"
-BENCH_BUILD_KINDS="ch-snap-cow+wall,ch-snap-cow@raw,ch-snap-cow@enc"
+EXPS="probe boot netplay clock build"
+BENCH_PARTS="gvisor-in-vm,godot"
+BENCH_BUILD_KINDS="ch-snap-cow+wall"
 BENCH_GODOT_KINDS="gvisor-in-vm"

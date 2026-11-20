@@ -114,6 +114,33 @@ GV = "sh /usr/local/lib/berth/gv.sh"
 GUEST_AVAIL = "awk '/MemAvailable/{print $2}' /proc/meminfo"
 
 
+def gv_call(host, cmd, timeout=120):
+    """在客机里跑一条要用 runsc 的命令。命令丢到后台、结果写进文件，宿主隔 10 毫秒去读一次：
+    干跑 2026-11-20 看到客机里一跑 runsc，经 vsock 发命令的那个 shell 就断了（setsid 也没用），
+    这样连接断了也拿得回结果。失败时把客机内核日志一起带回来。"""
+    tag = os.urandom(4).hex()
+    job = f"/run/gvj.{tag}"
+    host.exec(f"setsid nohup sh -c {shlex.quote(f'{cmd} > {job}.out 2>&1; echo $? > {job}.rc')} </dev/null >/dev/null 2>&1 &", 30)
+    end = now() + timeout
+    code = None
+    while now() < end:
+        with contextlib.suppress(B.GuestErr, OSError):
+            rc, out = host.exec(f"cat {job}.rc 2>/dev/null", 10)
+            if out.strip().isdigit():
+                code = int(out.strip())
+                break
+        time.sleep(0.01)
+    out = ""
+    with contextlib.suppress(B.GuestErr, OSError):
+        _, out = host.exec(f"cat {job}.out 2>/dev/null; rm -f {job}.*", 10)
+    if code is None or code != 0:
+        diag = ""
+        with contextlib.suppress(B.GuestErr, OSError):
+            _, diag = host.exec("dmesg | tail -30", 10)
+        raise RuntimeError(f"客机里的 runsc 命令{'超时' if code is None else f'退出 {code}'}：{out[-600:]}\n== dmesg\n{diag[-1500:]}")
+    return out
+
+
 def guest_avail_kb(env):
     rc, out = env.exec(GUEST_AVAIL, 30)
     return int(out.split()[-1]) if rc == 0 else None
@@ -193,7 +220,11 @@ def exp_probe():
             res = {}
             if kind == "gvisor-in-vm":
                 env.exec(f"cat > /work/p1.sh <<'EOF1'\n{PROBE}\nEOF1\ncat > /work/p2.sh <<'EOF2'\n{PROBE2}\nEOF2", 30)
-                rc, out = env.exec(f"export GV_DEBUG=1; {GV} start pr /work && {GV} x pr 'sh /data/p1.sh'; {GV} x pr 'sh /data/p2.sh'", 120)
+                try:
+                    out = gv_call(env, f"export GV_DEBUG=1; {GV} start pr /work && {GV} x pr 'sh /data/p1.sh'; {GV} x pr 'sh /data/p2.sh'")
+                    rc = 0
+                except RuntimeError as e:
+                    rc, out = 1, str(e)
                 res["probe"] = out[-3000:]
             else:
                 rc, out = env.exec(PROBE, 60)
@@ -394,20 +425,18 @@ def exp_boot():
                     host.exec(f"mkdir -p /work/d{i} && cp /work/.berth-marker /work/d{i}/", 30)  # 作品的数据本来就在
                     a0 = guest_avail_kb(host)
                     t0 = now()
-                    rc, out = host.exec(f"{GV} up g{i} /work/d{i}", 120)
-                    if rc:
-                        raise RuntimeError(f"沙箱没起来: {out[-400:]}")
+                    gv_call(host, f"{GV} up g{i} /work/d{i}")
                     t_to_app = now() - t0
                     time.sleep(1)
                     a1 = guest_avail_kb(host)
                     t = now()
-                    host.exec(f"{GV} down g{i}", 60)
+                    gv_call(host, f"{GV} down g{i}", 60)
                     return {"t_to_app": t_to_app, "t_down": now() - t, "guest_mem_kb": (a0 - a1) if a0 and a1 else None}
 
                 guard(rec, {"part": "gvisor-in-vm", "kind": host_kind, "data": "dir", "rep": i}, one,
                       key=("gvisor-in-vm", host_kind, "dir"))
                 with contextlib.suppress(Exception):
-                    host.exec(f"{GV} down g{i}", 60)
+                    gv_call(host, f"{GV} down g{i}", 60)
         except Exception as e:  # noqa: BLE001
             rec.put(ok=False, part="gvisor-in-vm", kind=host_kind, err=repr(e)[:800], vmm_log=host.vmm_log())
         finally:
@@ -428,13 +457,11 @@ def exp_boot():
                 host.hot_add(disk, path=f"/tmp/data{i}")
                 try:
                     t_attach = now() - t0
-                    rc, out = host.exec(f"{GV} up g{i} /tmp/data{i}", 120)
-                    if rc:
-                        raise RuntimeError(f"沙箱没起来: {out[-400:]}")
+                    gv_call(host, f"{GV} up g{i} /tmp/data{i}")
                     t_to_app = now() - t0
                 finally:
                     with contextlib.suppress(Exception):
-                        host.exec(f"{GV} down g{i}", 60)
+                        gv_call(host, f"{GV} down g{i}", 60)
                     host.hot_remove()  # 拔不干净就抛出去，这台宿主虚拟机后面的样本不可信
                 disk.destroy()
                 return {"t_attach": t_attach, "t_to_app": t_to_app, "dev": host.hot_dev}
@@ -993,9 +1020,11 @@ def exp_density():
                 stop_reason = "time"
                 break
             t0 = now()
-            rc, out = host.exec(f"mkdir -p /tmp/d{i} && {GV} up g{i} /tmp/d{i}", 120)
-            if rc:
-                rec.put(ok=False, part="step", kind="gvisor-in-vm", shape="pages", i=i, err=out[-400:])
+            host.exec(f"mkdir -p /tmp/d{i} && cp /etc/os-release /tmp/d{i}/.berth-marker", 30)
+            try:
+                gv_call(host, f"{GV} up g{i} /tmp/d{i}")
+            except Exception as e:  # noqa: BLE001
+                rec.put(ok=False, part="step", kind="gvisor-in-vm", shape="pages", i=i, err=repr(e)[-1500:])
                 stop_reason = "fail"
                 break
             k += 1
@@ -1476,10 +1505,14 @@ def exp_netplay():
                 t0 = now()
                 env.start()
                 if kind == "gvisor-in-vm":
-                    rc, out = env.exec(f"{GV} start gd /work", 120)
-                    if rc:
-                        raise RuntimeError(f"沙箱没起来: {out[-300:]}")
-                    run = lambda: env.exec(f"{GV} x gd '{godot_run('/data')}'", 300)
+                    gv_call(env, f"{GV} start gd /work")
+                    env.exec(f"cat > /work/godot-run.sh <<'EOFG'\n{godot_run('/data')}\nEOFG", 30)
+
+                    def run():
+                        try:
+                            return 0, gv_call(env, f"{GV} x gd 'sh /data/godot-run.sh'", 300)
+                        except RuntimeError as e:
+                            return 1, str(e)
                 else:
                     run = lambda: env.exec(godot_run("/work"), 300)
                 t_env = now() - t0

@@ -661,9 +661,11 @@ class VMEnv(Env):
         return [self.proc.pid] if self.alive() else []
 
     def vmm_log(self):
-        with contextlib.suppress(OSError):
-            return open(f"{self.dir}/vmm.log", errors="replace").read()[-1500:]
-        return ""
+        out = ""
+        for f in ("vmm.log", "serial.log"):
+            with contextlib.suppress(OSError):
+                out += f"== {f}\n" + open(f"{self.dir}/{f}", errors="replace").read()[-1500:]
+        return out
 
     def stop(self, graceful=True):
         r = {}

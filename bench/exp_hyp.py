@@ -462,7 +462,8 @@ def exp_clock():
         _run_env(bench, rec, {"kind": kind}, env, measure)
 
 
-CLOCK_LOOP = "import sys,time\nfor _ in sys.stdin:\n    print(time.time_ns(), flush=True)"
+# 先回一声 R 再开始答：不然宿主紧接着发的第一行可能被客机里的 shell 一起读走、丢了（干跑 2026-11-20 撞上）
+CLOCK_LOOP = "import sys,time\nprint('R', flush=True)\nfor _ in sys.stdin:\n    print(time.time_ns(), flush=True)"
 
 
 class ClockReader:
@@ -488,6 +489,9 @@ class ClockReader:
                 cmd = env._cli() + ["exec", env.name, "python3", "-c", CLOCK_LOOP]
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
             self.f = self.proc.stdout
+        first = self.f.readline()
+        if first.strip() != b"R":
+            raise RuntimeError(f"读钟循环没起来：{first[-200:]!r}")
         for _ in range(5):  # 热身：python 起来、第一次往返不算
             self.read()
 
