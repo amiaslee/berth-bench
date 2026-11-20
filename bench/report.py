@@ -81,6 +81,18 @@ def group(rows, *keys):
 
 gates = {}
 
+# 这次量的是哪些版本：跟 gVisor 行为有关的几项（撞上限证据、不联网、醒来时间、换代切换）都是下面这个 gVisor 版本量的
+_vf = os.path.join(D, "versions.txt")
+if os.path.exists(_vf):
+    print("### 这次量的版本\n")
+    for line in open(_vf):
+        if line.strip():
+            print(f"- {line.strip()}")
+    _sf = os.path.join(D, "SOURCES.txt")
+    if os.path.exists(_sf):
+        print("\n下载件的 sha256 在结果目录的 `SOURCES.txt`（官方给了校验和的已照校验）。")
+    print("\n跟 gVisor 行为有关的几项（撞上限证据、不联网、醒来时间、换代切换）都是上面这个 gVisor 版本量的，跟旧版的数对照时注明版本。")
+
 # ---- 一 起机和醒来 ----
 boot = load("boot")
 if boot:

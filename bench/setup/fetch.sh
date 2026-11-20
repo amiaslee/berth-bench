@@ -6,6 +6,24 @@ need_root
 D="$BENCH_ROOT/dl"; B="$BENCH_ROOT/bin"; mkdir -p "$D" "$B"
 cd "$D"
 
+# 四种隔离用借机那天官方最新的正式版（berth 主会话 2026-11-20 转 Pages 的提醒）：装前查一次发布页，
+# 查不到才退回 env.sh 里钉的版本。BENCH_PIN=1 时一律用钉的版本（复现旧结果用）。
+if [ "${BENCH_PIN:-0}" != 1 ]; then
+  gh_latest() { curl -fsS --retry 3 "https://api.github.com/repos/$1/releases/latest" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])'; }
+  v=$(gh_latest firecracker-microvm/firecracker 2>/dev/null) && FC_VER=$v
+  v=$(gh_latest cloud-hypervisor/cloud-hypervisor 2>/dev/null) && CH_VER=$v
+  v=$(gh_latest kata-containers/kata-containers 2>/dev/null) && KATA_VER=$v
+  # gVisor 的正式版目录是 releases/release/<日期>[.<序号>]，挑最新的、带 x86_64 包的那一个
+  v=$(curl -fsS --retry 3 "https://storage.googleapis.com/storage/v1/b/gvisor/o?prefix=releases/release/2&delimiter=/" \
+      | python3 -I -c '
+import json, re, sys
+ps = [p.split("/")[2] for p in json.load(sys.stdin).get("prefixes", [])]
+ps = [p for p in ps if re.fullmatch(r"\d{8}(\.\d+)?", p)]
+key = lambda p: (p.split(".")[0], int(p.split(".")[1]) if "." in p else -1)
+print(sorted(ps, key=key)[-1])' 2>/dev/null) && GVISOR_REL=$v
+fi
+log "这次装的版本：Firecracker $FC_VER、Cloud Hypervisor $CH_VER、gVisor $GVISOR_REL、Kata $KATA_VER"
+
 log "Firecracker $FC_VER"
 fetch "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VER/firecracker-$FC_VER-x86_64.tgz.sha256.txt" fc.sha256.txt
 fetch "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VER/firecracker-$FC_VER-x86_64.tgz" fc.tgz "$(awk '{print $1}' fc.sha256.txt)"
@@ -46,7 +64,8 @@ if [ ! -s "$BENCH_ROOT/guest/vmlinux" ]; then
   fetch "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VER.tar.xz" linux.tar.xz "$KERNEL_SHA256"
 fi
 
-{ echo "firecracker: $("$B/firecracker" --version 2>&1 | head -1)"
+{ echo "装的版本（借机那天查的官方最新）：firecracker=$FC_VER cloud-hypervisor=$CH_VER gvisor=$GVISOR_REL kata=$KATA_VER guest-kernel=$KERNEL_VER"
+  echo "firecracker: $("$B/firecracker" --version 2>&1 | head -1)"
   echo "cloud-hypervisor: $("$B/cloud-hypervisor" --version 2>&1 | head -1)"
   echo "runsc: $("$B/runsc" --version 2>&1 | head -2 | tr '\n' ' ')"
   echo "kata: $(/opt/kata/runtime-rs/bin/containerd-shim-kata-v2 --version 2>&1 | head -1)"

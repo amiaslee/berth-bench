@@ -1,7 +1,7 @@
 # GitHub 干跑只跑这里点到的（只重跑改到的那几组，省时间）。
 # EXPS：跑哪几个实验；BENCH_PARTS：起机、换盘、NetPlay 里只跑哪几段（不写就全跑）；
 # BENCH_BUILD_KINDS / BENCH_GODOT_KINDS：编译、Godot 只跑哪几种。整套重跑要先在报告里说一声。
-EXPS="boot"
-BENCH_PARTS="handover"
+EXPS="env"
+BENCH_PARTS=""
 BENCH_BUILD_KINDS="ch-snap-cow+wall"
 BENCH_GODOT_KINDS="gvisor-in-vm"
