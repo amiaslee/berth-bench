@@ -1,0 +1,54 @@
+# 实验脚本的干跑：在 GitHub 托管跑机上（嵌套 KVM）把要在裸金属上跑的脚本先走一遍。
+# 只看脚本对不对；数是嵌套虚拟化下的，不作数。只跑 bench/dryrun.txt 里点到的。
+name: bench-dryrun
+on:
+  push:
+    branches: [main]
+    paths: ["bench/**", ".github/workflows/bench-dryrun.yml"]
+  workflow_dispatch: {}
+jobs:
+  dryrun:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      BENCH_QUICK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 腾地方
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h / ; nproc ; free -m
+      - name: 取缓存（编好的客机内核、下载的东西）
+        uses: actions/cache@v4
+        with:
+          path: ~/bench-cache
+          key: bench-${{ hashFiles('bench/env.sh', 'bench/setup/kernel.sh') }}
+      - name: 放回缓存
+        run: |
+          if [ -d ~/bench-cache/guest ]; then sudo mkdir -p /opt/bench && sudo cp -a ~/bench-cache/guest ~/bench-cache/dl /opt/bench/; fi
+      - name: 装机（宿主、下载、内核、根盘、共享快照）
+        run: sudo -E bash bench/run-all.sh setup
+      - name: 存缓存
+        if: always()
+        run: |
+          mkdir -p ~/bench-cache && sudo cp -a /opt/bench/guest /opt/bench/dl ~/bench-cache/ 2>/dev/null || true
+          sudo chown -R "$(id -u)" ~/bench-cache || true
+      - name: 实验（快跑，只跑 bench/dryrun.txt 里点到的）
+        run: |
+          set -a; . bench/dryrun.txt; set +a
+          sudo -E bash bench/run-all.sh exp $EXPS
+        continue-on-error: true
+      - name: 收结果
+        if: always()
+        run: |
+          mkdir -p out
+          sudo cp -r /srv/bench/results out/ || true
+          sudo cp /opt/bench/guest/vmlinux /opt/bench/guest/config-* out/ 2>/dev/null || true
+          sudo cp /opt/bench/versions.txt /opt/bench/state.json out/ 2>/dev/null || true
+          sudo chown -R "$(id -u)" out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-dryrun
+          path: out
+          retention-days: 14

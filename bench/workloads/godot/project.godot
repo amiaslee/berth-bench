@@ -1,0 +1,5 @@
+; berth 实验：Godot 无界面版冷启动用的最小工程
+config_version=5
+
+[application]
+config/name="berth-coldstart"

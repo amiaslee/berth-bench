@@ -1,0 +1,8 @@
+#!/bin/sh
+# 每台虚拟机一个私有的挂载命名空间：把这台的目录绑到 /run/vm，再 exec 虚拟机管理程序。
+# 共用快照里记的路径都是 /run/vm/...，这样同一份快照能同时恢复很多台，各用各的 socket 和盘。
+# 先把自己放进这台的 cgroup（在 shell 里做，不用 Python 的 preexec_fn：多线程同时起虚拟机时那个有死锁风险）。
+# 用法：vmns <这台的目录> <cgroup 目录或 -> <程序> [参数...]
+d=$1; cg=$2; shift 2
+[ "$cg" != - ] && echo $$ > "$cg/cgroup.procs"
+exec unshare -m --propagation private -- /bin/sh -c 'mount --bind "$0" /run/vm && exec "$@"' "$d" "$@"
