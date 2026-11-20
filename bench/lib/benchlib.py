@@ -888,13 +888,18 @@ class OCIEnv(Env):
 
     def start(self):
         t0 = now()
-        if self.disk is not None:
+        if self.opts.get("mnt"):
+            # 用一个已经挂着的目录（H27 对照"Pages 今天的做法"：新容器直接用旧的挂载点，不卸不挂）
+            self.mnt, self.own_mnt = self.opts["mnt"], False
+        elif self.disk is not None:
+            t_m = now()
             self.mnt = host_mount(self.disk.dev, self.name)
+            self.t["t_mount"] = now() - t_m
         shutil.rmtree(self.bundle, ignore_errors=True)
         os.makedirs(self.bundle)
         mem_max = self.mem << 20  # 整个环境的预算，跟虚拟机的内存一样大
         with open(f"{self.bundle}/config.json", "w") as f:
-            json.dump(oci_spec(self.name, ["/bin/sleep", "infinity"], self.mnt, self.cpus(), mem_max,
+            json.dump(oci_spec(self.name, self.opts.get("init_args") or ["/bin/sleep", "infinity"], self.mnt, self.cpus(), mem_max,
                                self.net["nspath"] if self.net else None, vcpus=self.vcpus), f)
         self.cg = f"{CG}/{self.name}"
         with open(f"{self.bundle}/run.log", "w") as lf:
@@ -920,6 +925,19 @@ class OCIEnv(Env):
         r = subprocess.run(self._cli() + ["exec", self.name, "/bin/sh", "-c", script],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout + r.stderr
+
+    def stop_writes(self, grace=10.0):
+        """换代时让旧的停写：发 SIGTERM，最多等 grace 秒它自己退，没退再 SIGKILL，然后删掉容器（不卸盘）。"""
+        sh(self._cli() + ["kill", self.name, "TERM"], check=False, timeout=30)
+        end = now() + grace
+        while now() < end:
+            r = sh(self._cli() + ["state", self.name], check=False, timeout=30)
+            if r.returncode or '"stopped"' in r.stdout:
+                break
+            time.sleep(0.005)
+        else:
+            sh(self._cli() + ["kill", self.name, "KILL"], check=False, timeout=30)
+        sh(self._cli() + ["delete", "-force" if self.runtime == "runsc" else "-f", self.name], check=False, timeout=120)
 
     def pause(self):
         sh(self._cli() + ["pause", self.name], timeout=60)
@@ -950,7 +968,8 @@ class OCIEnv(Env):
         subprocess.run(self._cli() + ["kill", self.name, "KILL"], capture_output=True, timeout=60)
         force = "-f" if self.runtime == "runc" else "-force"
         subprocess.run(self._cli() + ["delete", force, self.name], capture_output=True, timeout=120)
-        host_umount(self.mnt)
+        if getattr(self, "own_mnt", True):
+            host_umount(self.mnt)
         cg_remove(self.cg)
         net_drop(self.net)
         shutil.rmtree(self.bundle, ignore_errors=True)

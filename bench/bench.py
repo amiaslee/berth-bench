@@ -475,6 +475,53 @@ def exp_boot():
         rec.put(ok=False, part="gvisor-in-vm", kind="ch-snap-cow", data="hotplug", err=repr(e)[:800])
     finally:
         host.stop(graceful=False)
+    # 2d. H27：Pages 发新版时作品后端停多久（gVisor 那一档、独占读写盘）。从旧的停写那一刻起，
+    #     berth 的做法：旧的停写（SIGTERM，最多等 10 秒）→ 卸盘 → 挂盘 → 新的起来、作品回话；
+    #     Pages 今天的做法（同机对照）：同样停旧的，不卸不挂，新容器直接用同一个挂载点起来到回话。
+    for i in range(R if want("handover") else 0):
+        for way in ("berth", "pages-today"):
+            disk = Disk(f"ho{i}-{way}")
+            # 容器的 1 号进程收到 SIGTERM 就退（sleep 当 1 号进程会忽略 SIGTERM，两种做法都得干等 10 秒）
+            init = ["/bin/sh", "-c", "trap 'exit 0' TERM; sleep infinity & wait"]
+            old = make_env("gvisor-systrap", f"hoa{i}-{way}", shape="pages", disk=disk, probe=False, init_args=init)
+            box = {}
+
+            def one():
+                disk.create()
+                old.start()
+                rc, out = old.exec(APP, 120)
+                if rc:
+                    raise RuntimeError(f"旧版本没起来: {out[-300:]}")
+                t0 = now()
+                old.stop_writes(10.0)
+                t_stopped = now() - t0
+                res = {"t_stop_old": t_stopped}
+                if way == "berth":
+                    t = now()
+                    B.host_umount(old.mnt)
+                    res["t_umount"] = now() - t
+                    new = make_env("gvisor-systrap", f"hob{i}-{way}", shape="pages", disk=disk, probe=False, init_args=init)
+                else:
+                    new = make_env("gvisor-systrap", f"hob{i}-{way}", shape="pages", probe=False, mnt=old.mnt, init_args=init)
+                box["new"] = new
+                new.start()
+                rc, out = new.exec(APP, 120)
+                if rc:
+                    raise RuntimeError(f"新版本没起来: {out[-300:]}")
+                res["handover_s"] = now() - t0
+                res["t_mount"] = new.t.get("t_mount")
+                new.stop(graceful=True)
+                old.stop(graceful=False)  # 收掉旧的 cgroup；pages-today 那一路顺带卸掉旧挂载点
+                disk.destroy()
+                return res
+
+            guard(rec, {"part": "handover", "kind": "gvisor-systrap", "way": way, "rep": i}, one, [old],
+                  key=("handover", way))
+            if box.get("new"):
+                with contextlib.suppress(Exception):
+                    box["new"].stop(graceful=False)
+            with contextlib.suppress(Exception):
+                disk.destroy()
     # 2c. gVisor 的检查点：跑着的作品连内存存到盘上、容器停下；来人时从检查点恢复
     for i in range(R if want("gvisor-ckpt") else 0):
         disk = Disk(f"ck{i}")

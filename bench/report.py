@@ -465,6 +465,19 @@ if boot:
                     f"主程序起来再加 {f(pct([r['t_main_launch'] for r in pw if 't_main_launch' in r], .5), 'ms')} ms、"
                     f"应用连得上中位 {f(pct(xs7, .5), 'ms')}、p99 {f(pct(xs7, .99), 'ms')} ms（线 1.0 / 1.5 秒）；"
                     "主程序起来记的是 Node 进程拉起那一刻，不等端口"))
+if boot:
+    ho = {w: [r for r in boot if r.get("part") == "handover" and r.get("way") == w] for w in ("berth", "pages-today")}
+    if ho["berth"] or ho["pages-today"]:
+        hb = [r["handover_s"] for r in ho["berth"] if r.get("ok")]
+        hp_ = [r["handover_s"] for r in ho["pages-today"] if r.get("ok")]
+        fails = sum(1 for w in ho for r in ho[w] if not r.get("ok"))
+        um = [r["t_umount"] for r in ho["berth"] if r.get("ok") and r.get("t_umount") is not None]
+        mo = [r["t_mount"] for r in ho["berth"] if r.get("ok") and r.get("t_mount") is not None]
+        okk = bool(hb) and bool(hp_) and fails == 0 and pct(hb, .5) <= pct(hp_, .5) and pct(hb, .99) <= pct(hp_, .99)
+        hyp.append(("H27", okk, f"换代停顿 handoverMs：berth 做法（停写、卸盘、挂盘、起新）中位 {f(pct(hb, .5), 'ms') if hb else '—'}、"
+                    f"p99 {f(pct(hb, .99), 'ms') if hb else '—'} ms；同机 Pages 今天的做法（停旧、直接起新）中位 {f(pct(hp_, .5), 'ms') if hp_ else '—'}、"
+                    f"p99 {f(pct(hp_, .99), 'ms') if hp_ else '—'} ms；卸盘中位 {f(pct(um, .5), 'ms') if um else '—'}、p99 {f(pct(um, .99), 'ms') if um else '—'} ms，"
+                    f"挂盘中位 {f(pct(mo, .5), 'ms') if mo else '—'}、p99 {f(pct(mo, .99), 'ms') if mo else '—'} ms；失败 {fails}（不比 Pages 做法长才算过）"))
 if build:
     def med_of(wl, kind):
         xs = [r["t_total"] for r in build if r.get("wl") == wl and r.get("kind") == kind and r.get("ok") and r.get("pin_ok", True)]
