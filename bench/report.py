@@ -401,7 +401,29 @@ if npl:
                     f(mx("udp_max")), f(sum(r.get("udp_lost", 0) for r in ok))])
         if a != "loopback":
             worst[(a, b)] = (ok, len(rs) - len(ok))
-    table("同机两台环境之间一次来回（微秒，几轮里最差的那一轮）",
+    gw = [r for r in npl if r.get("part") == "gateway"]
+    if gw:
+        rows_gw, bad_gw = [], []
+        for path in ("via-gateway", "to-gateway-host", "direct-to-rule"):
+            for phase in ("idle", "busy"):
+                for size in (1024, 16384, 65536):
+                    rs = [r for r in gw if r.get("path") == path and r.get("phase") == phase and r.get("size") == size]
+                    if not rs:
+                        continue
+                    ok = [r for r in rs if r.get("ok")]
+                    p50 = max((r["p50"] for r in ok), default=None)
+                    p99 = max((r["p99"] for r in ok), default=None)
+                    rows_gw.append([path, phase, size, len(ok), len(rs) - len(ok), f(p50), f(p99),
+                                    f(max((r["p999"] for r in ok), default=None)), f(max((r["max"] for r in ok), default=None))])
+                    if path == "via-gateway" and phase == "idle" and (not ok or len(ok) < len(rs) or p50 > 500 or p99 > 2000):
+                        bad_gw.append(f"{size} 字节（p50 {f(p50)}、p99 {f(p99)} 微秒，成 {len(ok)}/{len(rs)}）")
+        table("H19 的量法：netplay 一侧经 Pages 规则网关进 gVisor 到规则回包，扣掉规则计算（微秒，几轮里最差的那一轮；同机近似）",
+              ["路径", "机器", "回包字节", "成", "败", "p50", "p99", "p99.9", "最大"], rows_gw)
+        need = [s for s in (1024, 16384, 65536) if not any(r.get("path") == "via-gateway" and r.get("phase") == "idle" and r.get("size") == s and r.get("ok") for r in gw)]
+        gates["G7"] = (not bad_gw and not need, ("经网关这一段三档回包都在 p50 0.5 毫秒、p99 2 毫秒以内" if not bad_gw and not need
+                       else "没过或没数的：" + "、".join(bad_gw + [f"{s} 字节没数" for s in need]))
+                       + "；机器忙时的 p99 另报在表里；一台机器上是同机近似，真实部署是同机房两台")
+    table("同机两台环境之间一次来回（微秒，几轮里最差的那一轮；四种隔离两两直连，只作诊断）",
           ["配对", "成", "败", "TCP p50", "p90", "p99", "p99.9", "最大", "UDP p50", "p99", "p99.9", "最大", "UDP 超时"], out)
     bad = []
     for pair in [("runc", "runc"), ("gvisor-systrap", "gvisor-systrap"), ("kata-clh", "kata-clh"), ("fc-cold", "fc-cold"),
@@ -416,7 +438,8 @@ if npl:
         lost = sum(r.get("udp_lost", 0) for r in ok) / max(1, sum(r.get("udp_n", 0) + r.get("udp_lost", 0) for r in ok))
         if p50 > 500 or p99 > 2000 or lost > 0.001:
             bad.append(f"{name}（p50 {p50:.0f}、p99 {p99:.0f} 微秒，UDP 超时 {lost:.2%}）")
-    gates["G7"] = (not bad, "都在 p50 0.5 毫秒、p99 2 毫秒以内，UDP 超时不过千分之一" if not bad else "没过的：" + "、".join(bad))
+    if not gw:  # 没跑经网关那一段时，退回按两两直连判（旧口径）
+        gates["G7"] = (not bad, "（旧口径：两两直连）都在 p50 0.5 毫秒、p99 2 毫秒以内，UDP 超时不过千分之一" if not bad else "（旧口径）没过的：" + "、".join(bad))
     gd = group([r for r in npl if r.get("part") == "godot"], "kind")
     out = []
     med = {}

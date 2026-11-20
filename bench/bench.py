@@ -1494,6 +1494,69 @@ def parse_rtt(out):
     return {k: float(v) for k, v in (kv.split("=") for kv in line.split())}
 
 
+RTT_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guest", "rtt.py")
+RULE_LOOP = ("import time\nwhile True:\n    t = time.perf_counter(); x = 0\n"
+             "    while time.perf_counter() - t < 0.004:\n        x += 1\n    time.sleep(0.029)")  # 一拍约 33 毫秒、算 4 毫秒
+
+
+def exp_gateway(rec, N):
+    client = make_env("ch-cold", "gwc", shape="pages", net=B.tap_make(90, bridge=True))
+    rule = make_env("gvisor-systrap", "gwr", shape="pages", net=B.netns_make(91, bridge=True))
+    procs, busy = [], []
+    try:
+        client.start()
+        rule.start()
+        rc, out = rule.exec("setsid nohup python3 /usr/local/lib/berth/rtt.py serve2 7000 >/dev/null 2>&1 </dev/null & "
+                            "i=0; while [ ! -f /tmp/rtt2.ready ]; do i=$((i+1)); [ $i -gt 600 ] && exit 9; sleep 0.05; done", 60)
+        if rc:
+            raise RuntimeError(f"规则那头的回声服务没起来: {out[-200:]}")
+        # 宿主上的网关（转发到规则）和"到网关折返"（宿主自己回）
+        procs.append(subprocess.Popen(["socat", "-b", "262144", "TCP-LISTEN:7100,bind=10.210.0.1,reuseaddr,fork",
+                                       f"TCP:{rule.net['guest_ip']}:7000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        procs.append(subprocess.Popen([sys.executable, RTT_PY, "serve2", "7101"], cwd="/tmp",
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        time.sleep(1)
+
+        def ping(target, port, size):
+            rc, out = client.exec(f"python3 /usr/local/lib/berth/rtt.py ping2 {target} {port} {N} {size}", 900)
+            if rc:
+                raise RuntimeError(f"来回失败（{target}:{port}，{size} 字节）: {out[-300:]}")
+            return parse_rtt(out)
+
+        for phase in ("idle", "busy"):
+            if phase == "busy":
+                # 同一台上几款游戏的规则同时在下（各一个 gVisor 沙箱、一拍算 4 毫秒），加一个检查容器（2 核、cgroup v2 最低权重）压满
+                for k in range(3):
+                    e = make_env("gvisor-systrap", f"gwb{k}", shape="pages")
+                    busy.append(e)
+                    e.start()
+                    e.exec(f"setsid nohup python3 -c {shlex.quote(RULE_LOOP)} >/dev/null 2>&1 </dev/null &", 30)
+                chk = make_env("runc", "gwchk", shape="dute")
+                busy.append(chk)
+                chk.start()
+                with open(f"{chk.cg}/cpu.weight", "w") as fw:
+                    fw.write("1")
+                chk.exec("for k in 1 2; do setsid nohup python3 /usr/local/lib/berth/burn.py 3600 >/dev/null 2>&1 </dev/null & done", 30)
+                time.sleep(2)
+            for size in (1024, 16384, 65536):
+                for rep in range(n(3, 1)):
+                    guard(rec, {"part": "gateway", "path": "via-gateway", "phase": phase, "size": size, "rep": rep},
+                          lambda: ping("10.210.0.1", 7100, size))
+            if phase == "idle":
+                for path, (tgt, port) in (("to-gateway-host", ("10.210.0.1", 7101)), ("direct-to-rule", (rule.net["guest_ip"], 7000))):
+                    guard(rec, {"part": "gateway", "path": path, "phase": phase, "size": 1024, "rep": 0},
+                          lambda: ping(tgt, port, 1024))
+    except Exception as e:  # noqa: BLE001
+        rec.put(ok=False, part="gateway", path="setup", err=repr(e)[:1500])
+    finally:
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.kill()
+        for e in busy + [rule, client]:
+            with contextlib.suppress(Exception):
+                e.stop(graceful=False)
+
+
 def exp_netplay():
     rec = Rec("netplay")
     N = n(20000, 2000)
@@ -1539,6 +1602,11 @@ def exp_netplay():
 
     if want("rtt"):
         guard(rec, {"part": "rtt", "a": "loopback", "b": "loopback", "rep": 0}, loop, [env])
+    # 1b. H19 照 netplay 2026-11-20 定的量法：netplay 一侧（一台虚拟机）带票 → 宿主上的 Pages 规则网关（这里用 socat 转发）
+    #     → gVisor 沙箱自己的网络栈 → 规则回包，扣掉规则自己的计算；回包 1KB、16KB、64KB 三档；空闲、机器忙各一遍。
+    #     "到网关折返"（宿主上直接回）和"不经网关直连规则"只拿来查卡在哪。一台机器上是同机近似，真实部署是同机房两台。
+    if want("gateway"):
+        exp_gateway(rec, n(20000, 2000))
     # 2. Godot 4.7.2 无界面版冷启动：从要一个新环境到 Godot 脚本跑到第一行；再跑一次看热的
     gkinds = [k for k in GODOT_KINDS if not os.environ.get("BENCH_GODOT_KINDS") or k in os.environ["BENCH_GODOT_KINDS"].split(",")]
     for i in range(n(10, 1) if want("godot") else 0):

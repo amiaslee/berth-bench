@@ -67,7 +67,62 @@ def ping(host, port, proto, n, size):
     q = lambda p: xs[min(len(xs) - 1, int(p * len(xs)))]
     print(f"n={len(xs)} lost={lost} p50={q(.5):.1f} p90={q(.9):.1f} p99={q(.99):.1f} p999={q(.999):.1f} max={xs[-1]:.1f}")
 
+# ---- H19 的量法（netplay 2026-11-20 定）：请求小、回包按指定大小；规则自己算的时间带回来，客户端减掉 ----
+# rtt.py serve2 <口>                         每个请求 16 字节（序号、要回多少字节）；回包头 16 字节（序号、规则计算纳秒）+ 填充
+# rtt.py ping2 <地址> <口> <次数> <回包字节>   先热身 1000 次；打印扣掉规则计算以后的 p50/p90/p99/p999/max（微秒）
+
+def serve2(port):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port)); s.listen(16)
+    def handle(c):
+        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        while True:
+            req = b""
+            while len(req) < 16:
+                b = c.recv(16 - len(req))
+                if not b:
+                    return
+                req += b
+            t0 = time.perf_counter_ns()
+            seq, n = struct.unpack("!QQ", req)
+            body = b"r" * max(0, n - 16)
+            c.sendall(struct.pack("!QQ", seq, time.perf_counter_ns() - t0) + body)
+    open("/tmp/rtt2.ready", "w").write("ok")
+    while True:
+        c, _ = s.accept()
+        threading.Thread(target=handle, args=(c,), daemon=True).start()
+
+def ping2(host, port, n, size):
+    s = socket.create_connection((host, port), timeout=10); s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.sendall(b"")  # 带票：真的网关在连接时验一次票，这里省了（每条消息不验）
+    def one(seq):
+        s.sendall(struct.pack("!QQ", seq, size))
+        got = b""
+        while len(got) < max(16, size):
+            b = s.recv(1 << 20)
+            if not b:
+                raise ConnectionError("对端关了连接")
+            got += b
+        rseq, proc = struct.unpack("!QQ", got[:16])
+        if rseq != seq:
+            raise ConnectionError("回包序号对不上")
+        return proc
+    for k in range(1000):
+        one(k)
+    xs = []
+    for k in range(1000, 1000 + n):
+        t = time.perf_counter_ns()
+        proc = one(k)
+        xs.append((time.perf_counter_ns() - t - proc) / 1000)
+    xs.sort()
+    q = lambda p: xs[min(len(xs) - 1, int(p * len(xs)))]
+    print(f"n={len(xs)} lost=0 p50={q(.5):.1f} p90={q(.9):.1f} p99={q(.99):.1f} p999={q(.999):.1f} max={xs[-1]:.1f}")
+
 if sys.argv[1] == "serve":
     serve(int(sys.argv[2]))
+elif sys.argv[1] == "serve2":
+    serve2(int(sys.argv[2]))
+elif sys.argv[1] == "ping2":
+    ping2(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]))
 else:
     ping(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), int(sys.argv[6]))
