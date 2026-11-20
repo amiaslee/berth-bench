@@ -1459,6 +1459,109 @@ def online_cpus():
     return out
 
 
+# ---------------- h28 ----------------
+
+def exp_h28():
+    """H28：Pages 作品是"每件一台自己的小虚拟机"还是"几台长住虚拟机里每件一个 gVisor"。醒来那一条直接用 boot 的数；
+    这里量"一台机器能同时醒着几件"：两种做法各一件一件地放（作品都跑着 Node、都带自己的数据），每放 10 件就
+    再醒 3 件新的当探针，探针的醒来中位 > 1.0 秒或 p99 > 1.5 秒（判据守不住）、或内存见底、或 10 分钟、或 400 件就停，
+    记最后一次守得住时的件数。"""
+    rec = Rec("h28")
+    cap, tcap, batch = n(400, 6), (10 * 60 if not B.QUICK else 180), n(10, 2)
+    reserve_kb = 3 * GIB // 1024
+
+    def fill(model, add_one):
+        cleanup_all()
+        drop_caches()
+        t_begin, count, good, stop = now(), 0, 0, "cap"
+        while count < cap:
+            if now() - t_begin > tcap:
+                stop = "time"
+                break
+            if B.safe_free_kb() < reserve_kb + 512 * 1024:
+                stop = "mem"
+                break
+            try:
+                for _ in range(batch):
+                    add_one(count, probe=False)
+                    count += 1
+                probes = [add_one(count + k, probe=True) for k in range(3)]
+                count += 3
+            except Exception as e:  # noqa: BLE001
+                rec.put(ok=False, part="step", model=model, count=count, err=repr(e)[-1200:])
+                stop = "fail"
+                break
+            ps = sorted(probes)
+            held = ps[1] <= 1.0 and ps[-1] <= 1.5
+            rec.put(ok=True, part="step", model=model, count=count, probes=probes, held=held, safe_free_kb=B.safe_free_kb())
+            if not held:
+                stop = "criterion"
+                break
+            good = count
+        rec.put(ok=good > 0, part="summary", model=model, count_held=good, count_reached=count, stop_reason=stop,
+                t_fill=now() - t_begin)
+        log("H28", model, "守得住的件数", good, "停在", stop)
+
+    # 做法 A：每件一台自己的小虚拟机（Cloud Hypervisor 从共用快照起、换上作品自己的数据盘、起 Node）
+    envs_a, disks_a = [], []
+
+    def add_vm(i, probe):
+        d = Disk(f"h28a-{i}")
+        d.create()
+        disks_a.append(d)
+        e = make_env("ch-snap-cow", f"h28a-{i}", shape="pages", disk=d)
+        envs_a.append(e)
+        t0 = now()
+        e.start()
+        rc, out = e.exec(APP, 120)
+        if rc:
+            raise RuntimeError(f"作品没起来: {out[-200:]}")
+        return now() - t0
+
+    try:
+        if want("h28-vm"):
+            fill("vm-per-work", add_vm)
+    finally:
+        for e in envs_a:
+            with contextlib.suppress(Exception):
+                e.stop(graceful=False)
+        for d in disks_a:
+            with contextlib.suppress(Exception):
+                d.destroy()
+
+    # 做法 B：长住虚拟机（4 核 8 GB）里每件一个 gVisor 沙箱，作品的数据在宿主虚拟机的盘上；一台装满再开一台
+    hosts, state = [], {"cur": None, "n": 0}
+
+    def new_host():
+        d = Disk(f"h28b-host{len(hosts)}")
+        d.create()
+        h = make_env("ch-cold", f"h28b-host{len(hosts)}", shape="pageshost", disk=d)
+        hosts.append((h, d))
+        h.start()
+        state["cur"] = h
+
+    def add_gv(i, probe):
+        h = state["cur"]
+        if h is None or (guest_avail_kb(h) or 0) < 600 * 1024:
+            new_host()
+            h = state["cur"]
+        h.exec(f"mkdir -p /work/w{i} && cp /work/.berth-marker /work/w{i}/", 30)  # 作品的数据本来就在
+        t0 = now()
+        gv_call(h, f"{GV} up w{i} /work/w{i}")
+        return now() - t0
+
+    try:
+        if want("h28-gvisor"):
+            fill("gvisor-in-vm", add_gv)
+            rec.put(ok=True, part="hosts", model="gvisor-in-vm", host_vms=len(hosts))
+    finally:
+        for h, d in hosts:
+            with contextlib.suppress(Exception):
+                h.stop(graceful=False)
+            with contextlib.suppress(Exception):
+                d.destroy()
+
+
 # ---------------- netplay ----------------
 
 RTT_PAIRS = [("runc", "runc"), ("gvisor-systrap", "gvisor-systrap"), ("kata-clh", "kata-clh"), ("fc-cold", "fc-cold"),
@@ -1662,6 +1765,7 @@ except ImportError:
 
 EXPS = {"env": exp_env, "probe": exp_probe, "snapshots": exp_snapshots, "boot": exp_boot, "disk": exp_disk, "density": exp_density,
         "build": exp_build, "reclaim": exp_reclaim, "usage": exp_usage, "smt": exp_smt, "netplay": exp_netplay,
+        "h28": exp_h28,
         "cleanup": cleanup_all, **HYP_EXPS}
 
 

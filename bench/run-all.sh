@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 need_root
 mkdir -p "$BENCH_RESULTS"
 command -v tb >/dev/null && tb busy 8h 'berth 真机实验在跑' >/dev/null 2>&1 || true
-EXPS_DEFAULT="boot disk netplay wall cmdnet agent clock gvlimits density build reclaim usage smt"
+EXPS_DEFAULT="boot disk netplay h28 wall cmdnet agent clock gvlimits density build reclaim usage smt"
 status=0
 step() {
   local name=$1; shift

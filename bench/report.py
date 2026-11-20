@@ -598,6 +598,25 @@ if dens:
         hyp.append(("H21", None, "；".join(f"{r['kind']} 停在内存里每台 PSS {r['paused_per_pss_kb'] / 1024:.0f} MB（放了 {r['count']} 台、确认暂停 {r.get('paused_count')}）" for r in pz)))
     hyp.append(("H4", None, "；".join(f"{r['kind']}/{r['shape']} 放了 {r.get('count')} 台（停在 {r.get('stop_reason')}，按 PSS 估最多 {r.get('est_max_count', '—')}）"
                                          for r in dens if r.get("kind") != "gvisor-in-vm") + "；满了以后明确拒要 berth 的准入，这批没有"))
+h28 = load("h28")
+if h28 or boot:
+    # H28：两条都过就"每件一台小虚拟机"；否则"几台长住虚拟机里每件一个 gVisor"
+    vmw = [r["t_to_app"] for r in warm_rows([r for r in boot if r.get("part") == "wake-pages" and r.get("kind") == "ch-snap-cow"]) if r.get("ok")] if boot else []
+    vmf = sum(1 for r in boot if r.get("part") == "wake-pages" and r.get("kind") == "ch-snap-cow" and not r.get("ok")) if boot else 0
+    gvw = [r["t_to_app"] for r in boot if r.get("part") == "gvisor-in-vm" and r.get("data") == "dir" and r.get("kind") == "ch-snap-cow" and r.get("ok")] if boot else []
+    c1 = bool(vmw) and vmf == 0 and pct(vmw, .5) <= 1.0 and pct(vmw, .99) <= 1.5
+    summ = {r.get("model"): r for r in h28 if r.get("part") == "summary"}
+    a, b = summ.get("vm-per-work", {}).get("count_held"), summ.get("gvisor-in-vm", {}).get("count_held")
+    c2 = bool(a) and bool(b) and a >= 0.8 * b
+    both = c1 and c2
+    hyp.append(("H28", both,
+                f"(1) 每件一台小虚拟机（Cloud Hypervisor 共用快照 + 换上作品的盘）醒来中位 {f(pct(vmw, .5), 'ms') if vmw else '—'}、"
+                f"p99 {f(pct(vmw, .99), 'ms') if vmw else '—'} ms（线 1.0 / 1.5 秒）{'过' if c1 else '没过'}；对照：长住虚拟机里起 gVisor "
+                f"中位 {f(pct(gvw, .5), 'ms') if gvw else '—'} ms。(2) 一台同时醒着、判据还守得住的件数：小虚拟机 {a if a else '—'}"
+                f"（停在 {summ.get('vm-per-work', {}).get('stop_reason', '—')}），长住虚拟机加 gVisor {b if b else '—'}"
+                f"（停在 {summ.get('gvisor-in-vm', {}).get('stop_reason', '—')}），要不少于八成 {'过' if c2 else '没过'}。"
+                f"结论：{'每件一台自己的小虚拟机' if both else '几台长住虚拟机里每件一个 gVisor'}"))
+
 if hyp:
     table("蓝图的待验假设（能在这一批判的）", ["编号", "判", "依据的数"],
           [[h, "只交数字" if okk is None else ("过" if okk else "没过"), why] for h, okk, why in hyp])
