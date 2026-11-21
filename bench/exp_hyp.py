@@ -122,12 +122,35 @@ net_add() {
     ip -n "c$1" route add default via "10.99.$1.1"
 }
 net_del() {
-    result=0
-    if [ -e "/run/netns/c$1" ]; then ip netns del "c$1" || result=1; fi
-    if ip link show "vh$1" >/dev/null 2>&1; then ip link del "vh$1" || result=1; fi
-    return "$result"
+    # 删网络空间时内核会顺带拆掉那对网卡，但不是立刻拆完；"已经没了"不算失败（真机 2026-11-21 撞上 RTNETLINK No such device）
+    ip netns del "c$1" 2>/dev/null || :
+    i=0
+    while ip link show "vh$1" >/dev/null 2>&1 && [ "$i" -lt 200 ]; do ip link del "vh$1" 2>/dev/null || :; i=$((i + 1)); sleep 0.005; done
+    return 0
+}
+net_clean() {  # 开头先清掉上一次可能留下的，放在计时之外
+    for k in $(seq 1 "$1"); do net_del "$k"; done
 }
 """
+
+
+SRC_CODE = ("import socket\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+            "s.bind(('0.0.0.0', 9100)); s.listen(64); print('R', flush=True)\nwhile True:\n    c,a=s.accept()\n"
+            "    try:\n        c.sendall((a[0]+'\\n').encode())\n    finally:\n        c.close()")
+
+
+@contextlib.contextmanager
+def _ns_source_server(guest_ip):
+    """来源服务放在网桥上的网络空间里（真机 2026-11-21：testbox 的宿主防火墙挡连宿主自己端口的连接）。"""
+    ns = B.ns_on_bridge("bsrc", 240, routes=[f"{CMDNET_ROUTE} via {guest_ip}"])
+    p = subprocess.Popen(["ip", "netns", "exec", "bsrc", sys.executable, "-c", SRC_CODE], stdout=subprocess.PIPE, text=True)
+    try:
+        if p.stdout.readline().strip() != "R":
+            raise RuntimeError("来源服务没起来")
+        yield ns["ip"], 9100
+    finally:
+        p.kill()
+        B.ns_drop(ns)
 
 
 @contextlib.contextmanager
@@ -177,6 +200,7 @@ finish() {{
 }}
 trap finish EXIT
 trap 'exit 1' HUP INT TERM
+net_clean 32
 for k in $(seq 1 {count}); do net_add "$k"; done
 for k in $(seq 1 {count}); do
     timeout -k 1s 15s sh -eu -c '
@@ -217,28 +241,22 @@ def exp_cmdnet():
         def one():
             # tap_make 中途失败也可能留下接口。只在本次加路由成功后登记删路由。
             cleanup.callback(bench.guard, rec, {"part": "tap-cleanup"}, lambda: B.net_drop({"dev": f"btap{CMDNET_TAP}"}))
-            net = B.tap_make(CMDNET_TAP)
+            net = B.tap_make(CMDNET_TAP, bridge=True)
             env = B.make_env("ch-cold", "hyp-cmdnet", shape="dute", net=net)
             cleanup.callback(bench.guard, rec, {"part": "env-cleanup"}, lambda: env.stop(graceful=False))
             if bench.guard(rec, {"part": "boot"}, env.start, [env]) is None:
                 return
             _guest(env, "sysctl -qw net.ipv4.ip_forward=1", 15)
-            route = [CMDNET_ROUTE, "via", net["guest_ip"], "dev", net["dev"]]
-            B.sh(["ip", "route", "add", *route], timeout=10)
-
-            def remove_route():
-                B.sh(["ip", "route", "del", *route], timeout=10)
-
-            cleanup.callback(bench.guard, rec, {"part": "route-cleanup"}, remove_route)
+            # 回 10.99.0.0/16 的路由加在来源服务的网络空间里（见 _ns_source_server），宿主上不加
             reps = bench.n(30, 3)
             _timings(bench, rec, env, "direct", reps, "/usr/bin/true")
             _timings(bench, rec, env, "netns", reps, 'net_add "$rep" && ip netns exec "c$rep" true',
-                     setup=NETNS + """rep=0
+                     setup=NETNS + f"net_clean {max(reps, 16)}\n" + """rep=0
 trap 'net_del "$rep"' EXIT
 trap 'exit 1' HUP INT TERM""", after='net_del "$rep"')
-            with _source_server(net["host_ip"]) as port:
+            with _ns_source_server(net["guest_ip"]) as (src_ip, port):
                 bench.guard(rec, {"part": "peer-batch"},
-                            lambda: _net_peers(rec, env, net["host_ip"], port, bench.n(16, 4)))
+                            lambda: _net_peers(rec, env, src_ip, port, bench.n(16, 4)))
 
         bench.guard(rec, {"part": "run"}, one)
 

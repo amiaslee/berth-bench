@@ -1290,9 +1290,9 @@ def exp_usage():
             idx += 1
             net = None
             if kind in ("fc-cold", "ch-cold"):
-                net = B.tap_make(idx)
+                net = B.tap_make(idx, bridge=True)
             elif kind in ("runc", "gvisor-systrap"):
-                net = B.netns_make(idx)
+                net = B.netns_make(idx, bridge=True)
             disk = Disk(f"us{i}-{kind}")
             env = make_env(kind, f"us{i}-{kind}", shape="dute", disk=disk, net=net, cpus=PIN2)
             tag = {"kind": kind, "rep": i}
@@ -1354,10 +1354,15 @@ def exp_usage():
                         out[f"zfs_{k}_after_trim_delta"] = p2[k] - p1[k]
                 # 发 256 MiB 给宿主
                 if net:
-                    sink = B.Sink(net["host_ip"])
-                    c0 = B.net_counters(net["dev"])
-                    rc, o = env.exec(f"python3 /usr/local/lib/berth/send.py {net['host_ip']} 9000 {n(256, 16)}", 600)
-                    got = sink.close()
+                    # 收字节的放在网桥上的网络空间里（宿主防火墙挡连宿主自己端口的连接，真机 2026-11-21 撞上）
+                    sns = B.ns_on_bridge(f"bsink{idx}", 200 + idx % 50)
+                    try:
+                        sink = B.NsSink(sns)
+                        c0 = B.net_counters(net["dev"])
+                        rc, o = env.exec(f"python3 /usr/local/lib/berth/send.py {sns['ip']} 9000 {n(256, 16)}", 600)
+                        got = sink.close()
+                    finally:
+                        B.ns_drop(sns)
                     if rc:
                         raise RuntimeError(f"往宿主发字节失败: {o[-300:]}")
                     time.sleep(1)
@@ -1613,10 +1618,14 @@ def exp_gateway(rec, N):
                             "i=0; while [ ! -f /tmp/rtt2.ready ]; do i=$((i+1)); [ $i -gt 600 ] && exit 9; sleep 0.05; done", 60)
         if rc:
             raise RuntimeError(f"规则那头的回声服务没起来: {out[-200:]}")
-        # 宿主上的网关（转发到规则）和"到网关折返"（宿主自己回）
-        procs.append(subprocess.Popen(["socat", "-b", "262144", "TCP-LISTEN:7100,bind=10.210.0.1,reuseaddr,fork",
-                                       f"TCP:{rule.net['guest_ip']}:7000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        procs.append(subprocess.Popen([sys.executable, RTT_PY, "serve2", "7101"], cwd="/tmp",
+        # 网关（转发到规则）和"到网关折返"（网关自己回）都放在网桥上的一个网络空间里：真机上 testbox 的宿主防火墙
+        # 挡住从虚拟网卡连宿主自己端口的连接（2026-11-21 撞上），网桥上环境之间的流量不经过它
+        gwns = B.ns_on_bridge("bgw", 250)
+        gw_ip = gwns["ip"]
+        procs.append(subprocess.Popen(["ip", "netns", "exec", "bgw", "socat", "-b", "262144",
+                                       f"TCP-LISTEN:7100,bind={gw_ip},reuseaddr,fork", f"TCP:{rule.net['guest_ip']}:7000"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        procs.append(subprocess.Popen(["ip", "netns", "exec", "bgw", sys.executable, RTT_PY, "serve2", "7101"], cwd="/tmp",
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         time.sleep(1)
 
@@ -1644,9 +1653,9 @@ def exp_gateway(rec, N):
             for size in (1024, 16384, 65536):
                 for rep in range(n(3, 1)):
                     guard(rec, {"part": "gateway", "path": "via-gateway", "phase": phase, "size": size, "rep": rep},
-                          lambda: ping("10.210.0.1", 7100, size))
+                          lambda: ping(gw_ip, 7100, size))
             if phase == "idle":
-                for path, (tgt, port) in (("to-gateway-host", ("10.210.0.1", 7101)), ("direct-to-rule", (rule.net["guest_ip"], 7000))):
+                for path, (tgt, port) in (("to-gateway-host", (gw_ip, 7101)), ("direct-to-rule", (rule.net["guest_ip"], 7000))):
                     guard(rec, {"part": "gateway", "path": path, "phase": phase, "size": 1024, "rep": 0},
                           lambda: ping(tgt, port, 1024))
     except Exception as e:  # noqa: BLE001
@@ -1658,6 +1667,7 @@ def exp_gateway(rec, N):
         for e in busy + [rule, client]:
             with contextlib.suppress(Exception):
                 e.stop(graceful=False)
+        B.ns_drop({"ns": "bgw", "dev": "bx250"})
 
 
 def exp_netplay():

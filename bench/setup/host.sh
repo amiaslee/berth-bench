@@ -38,7 +38,7 @@ for c in cpuset cpu io memory pids; do echo "+$c" > /sys/fs/cgroup/bench/cgroup.
 
 log "存储：优先拿一块没用的整盘建 ZFS 池"
 storage=file; pool_dev=""
-if lsmod | grep -q '^zfs ' && command -v zpool >/dev/null; then
+if grep -q '^zfs ' /proc/modules && command -v zpool >/dev/null; then
   if zpool list -H "$BENCH_POOL" >/dev/null 2>&1; then
     storage=zfs; pool_dev=$(zpool list -vHP "$BENCH_POOL" | awk 'NR==2{print $1}')
   else

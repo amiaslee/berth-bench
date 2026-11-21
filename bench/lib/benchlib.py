@@ -504,6 +504,49 @@ def netns_make(idx, bridge=False):
             "cidr": f"{gip}/{plen}"}
 
 
+def ns_on_bridge(name, last_octet, routes=()):
+    """在网桥上开一个独立的网络空间（地址 10.210.0.<last_octet>/24），给收字节、网关、来源服务用。"""
+    bridge_up()
+    vb, vc = f"bx{last_octet}", f"by{last_octet}"
+    ip = f"10.210.0.{last_octet}"
+    sh(f"ip netns del {name} 2>/dev/null; ip link del {vb} 2>/dev/null; ip netns add {name} && "
+       f"ip link add {vb} type veth peer name {vc} && ip link set {vc} netns {name} && "
+       f"ip link set {vb} master {BRIDGE} && ip link set {vb} up && "
+       f"ip -n {name} addr add {ip}/24 dev {vc} && ip -n {name} link set {vc} up && ip -n {name} link set lo up")
+    for r in routes:
+        sh(f"ip -n {name} route add {r}")
+    return {"ns": name, "ip": ip, "dev": vb}
+
+
+def ns_drop(ns):
+    if ns:
+        sh(f"ip netns del {ns['ns']} 2>/dev/null; ip link del {ns['dev']} 2>/dev/null; true", check=False)
+
+
+SINK_CODE = ("import socket,sys\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+             "s.bind((sys.argv[1], int(sys.argv[2]))); s.listen(1); s.settimeout(120)\nprint('R', flush=True)\n"
+             "c,_=s.accept(); c.settimeout(300); n=0\nwhile True:\n    b=c.recv(1<<20)\n    if not b: break\n    n+=len(b)\n"
+             "c.close(); print(n, flush=True)")
+
+
+class NsSink:
+    """在网桥上的网络空间里收字节，数应用层收到多少（替换原来开在宿主上的 Sink）。"""
+
+    def __init__(self, ns, port=9000):
+        self.p = subprocess.Popen(["ip", "netns", "exec", ns["ns"], sys.executable, "-c", SINK_CODE, ns["ip"], str(port)],
+                                  stdout=subprocess.PIPE, text=True)
+        if self.p.stdout.readline().strip() != "R":
+            raise RuntimeError("收字节的服务没起来")
+
+    def close(self):
+        try:
+            out, _ = self.p.communicate(timeout=300)
+            return int(out.strip().split()[-1])
+        except Exception:  # noqa: BLE001
+            self.p.kill()
+            return None
+
+
 def net_drop(net):
     if not net:
         return
@@ -1181,6 +1224,8 @@ def cleanup_all():
     for d in (VMS, BUNDLES):
         shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
+    sh("for n in $(ip netns list | grep -o '^b[a-z]*ns[0-9]*\\|^bgw\\|^bsrc\\|^bsink[0-9]*'); do ip netns del $n; done; "
+       "for d in $(ip -o link | awk -F': ' '{print $2}' | cut -d@ -f1 | grep '^bx[0-9]*$'); do ip link del $d; done; true", check=False)
     if ZFS:
         for parent in (f"{POOL}/users", f"{POOL}/recv", f"{POOL}/comp", f"{POOL}/enc/users"):
             r = sh(["zfs", "list", "-H", "-o", "name", "-d", "1", parent], check=False)

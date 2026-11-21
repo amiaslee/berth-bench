@@ -223,7 +223,7 @@ if build:
     med = {}
     out = []
     for (wl, kind), rs in sorted(g.items()):
-        ok = [r for r in rs if r.get("ok") and r.get("pin_ok", True)]
+        ok = [r for r in rs if r.get("ok") and (r.get("pin_ok", True) or kind == "native")]
         xs = [r["t_total"] for r in ok]
         m = statistics.median(xs) if xs else None
         med[(wl, kind)] = m
@@ -515,7 +515,8 @@ if boot:
                     f"挂盘中位 {f(pct(mo, .5), 'ms') if mo else '—'}、p99 {f(pct(mo, .99), 'ms') if mo else '—'} ms；失败 {fails}（不比 Pages 做法长才算过）"))
 if build:
     def med_of(wl, kind):
-        xs = [r["t_total"] for r in build if r.get("wl") == wl and r.get("kind") == kind and r.get("ok") and r.get("pin_ok", True)]
+        xs = [r["t_total"] for r in build if r.get("wl") == wl and r.get("kind") == kind and r.get("ok")
+              and (r.get("pin_ok", True) or kind == "native")]
         return statistics.median(xs) if xs else None
 
     for hid, a, b, line, what in (("H5", "ch-snap-cow", "native", 1.3, "虚拟机（Cloud Hypervisor）比原生"),
