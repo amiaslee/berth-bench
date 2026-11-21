@@ -971,7 +971,7 @@ def exp_density():
     cap = n(300, 3)
     reserve_kb = 3 * GIB // 1024
     tcap = 8 * 60 if not B.QUICK else 120
-    for kind, shape in DENSITY:
+    for kind, shape in (DENSITY if want("density-main") else []):
         cleanup_all()
         drop_caches()
         time.sleep(3)
@@ -1052,8 +1052,13 @@ def exp_density():
                 **dk, **per, **(paused or {}))
         log("密度", kind, shape, "放了", k, "台，停在", stop_reason)
     # 一台大虚拟机（4 核 8 GB）里放多少个 gVisor 沙箱（Pages 那条路），每个跑着 Node
+    if not want("density-gvm"):
+        return
     cleanup_all()
-    host = make_env("ch-cold", "dgvm", shape="pageshost")
+    # 跟 H28 的长住虚拟机一样带一块盘、作品放在 /work 下（真机 2026-11-21：不带盘、放 /tmp 的这一路第一个沙箱就起不来，H28 那一路 403 个都好）
+    hdisk = Disk("dgvm-host")
+    hdisk.create()
+    host = make_env("ch-cold", "dgvm", shape="pageshost", disk=hdisk)
     try:
         host.start()
         a0 = guest_avail_kb(host)
@@ -1067,11 +1072,12 @@ def exp_density():
                 stop_reason = "time"
                 break
             t0 = now()
-            host.exec(f"mkdir -p /tmp/d{i} && cp /etc/os-release /tmp/d{i}/.berth-marker", 30)
+            host.exec(f"mkdir -p /work/d{i} && cp /work/.berth-marker /work/d{i}/", 30)
             try:
-                gv_call(host, f"{GV} up g{i} /tmp/d{i}")
+                gv_call(host, f"{GV} up g{i} /work/d{i}")
             except Exception as e:  # noqa: BLE001
-                rec.put(ok=False, part="step", kind="gvisor-in-vm", shape="pages", i=i, err=repr(e)[-1500:])
+                m = repr(e)
+                rec.put(ok=False, part="step", kind="gvisor-in-vm", shape="pages", i=i, err=m[:1200] + " …… " + m[-600:])
                 stop_reason = "fail"
                 break
             k += 1
@@ -1090,6 +1096,8 @@ def exp_density():
                 err=repr(e)[:800], vmm_log=host.vmm_log())
     finally:
         host.stop(graceful=False)
+        with contextlib.suppress(Exception):
+            hdisk.destroy()
 
 
 # ---------------- build ----------------

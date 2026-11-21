@@ -338,6 +338,8 @@ class Disk:
 
     def props(self):
         if self.ds:
+            # 先让 ZFS 把这一轮事务组落盘，不然刚 sync 完读到的写入量只有一部分（真机 2026-11-21：1 GiB 只记到 0.56）
+            sh(["zpool", "sync", POOL], check=False, timeout=120)
             return zfs_props(self.ds)
         return {"file_bytes": os.stat(self.dev).st_blocks * 512} if not self.dev.startswith("/dev/") else {}
 
